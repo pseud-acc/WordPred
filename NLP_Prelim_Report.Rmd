@@ -1,0 +1,808 @@
+---
+title: 'NLP: Word Prediction - Markov Chain Methods'
+author: "FNwobu"
+date: "07/10/2021"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      cache.lazy = FALSE)
+options(width = 120)
+library(dplyr); library(ggplot2); library(R.utils)
+library(quanteda); library(readtext); library(wordcloud2)
+library(RColorBrewer); library(quanteda.textplots); library(quanteda.textmodels)
+library(quanteda.textstats); library(qdapDictionaries); library(stringr)
+library(ggpubr);library(cowplot);library(webshot);library(htmlwidgets);library(gridExtra)
+```
+
+# **Objective**
+
+The aim of this project is to use a sample body of text - extracted from blogs, twitter and the news - in order to create a prediction algorithm able to predict the next word of a given input phrase. The ultimate goal is to implement this prediction algorithm in a Shiny app. As such, in the interests of usability, the memory requirements and runtime of the prediction algorithm will be a key consideration during its development.
+
+This report covers several areas of the predictive algorithms development. First, the predictive algorithm methodolgy and setup is explained. Subsequently, the algorithm development process is described - this consists of pre-processing carried out on the input texts or "corpus"; exploratory analysis, modelling, benchmark testing and initial output results. Finally, there is a discussion of how the predictive algorithm could be implemented in the Shiny App, and what potential improvements could be made.
+
+# **How the Algorithm Works?**
+
+In this report, two different algorithms are investigated:
+
+  1.  Markov Chain Model w/ Stupid Back-Off
+  2.  Katz Back-Off Model
+  
+To generate the training corpus (generated from the news, blog and twitter sources) from which the algorithms extract predictions, the text is word tokenised under the following assumptions:
+
+-  Non-case sensitive - reduces the size of the corpus increases the speed of word searches in the algorithm
+-  Stop words will not be removed - stopwords are commonly used in everyday speech
+-  Only English words will be retained from the source texts - word prediction algorithm assumes English language input
+-  All numbers will be removed
+-  All profanities will be removed - design specification
+-  Punctuation and special characters will be removed - algorithm is restricted to predicting only text
+-  Contractions will be retained - contractions are common in everyday speech
+-  Urls will be removed
+-  Separators will be removed
+-  Whitespaces not discarded
+-  Word stemming not used - although word stemming reduces the size of a corpus, similar words are assumed identical whereas this is not the case in everyday speech
+
+Both algorithms have the same initial setup process (1-3) - and subsequently diverge:
+
+  1. Text from twitter, blogs and news is tokenised, pre-processed (based on above assumptions) and converted into a frequency table of n-grams (uni-grams, bi-grams, tri-grams and quad-grams)
+  2. Input text is parsed into word tokens and pre-processed via same process as text corpus
+  3. The last "n" words of the input text are converted into an n-gram ("n" is an input argument to the algorithm, n <= 4) - this is defined as the n-gram prefix of the word to be predicted - i.e. it is the n-gram prefix of the (n+1)-gram text output
+
+**[Markov Chain Model - w/ Stupid Back-Off]**
+
+  4. Algorithm searches through (n+1)-grams in frequency table to find (n+1)-gram with an n-gram prefix corresponding to the input text 
+  5. If no matching (n+1)-grams found, input text n-gram is reduced by an order of 1 (i.e. n=n-1) and steps 3-4 are repeated until n=1, otherwise:
+        a. Matching (n+1)-grams are selected, ranked by frequency and outputted
+  6. If word is not in corpus, output word selected from uni-grams with highest frequencies
+	
+**[Katz Back-Off Model]**
+
+  4. Select values for discounts at the n-gram and (n+1)-gram level
+  5. Search through frequency table and find (n+1)-grams completed by the n-gram prefix 
+  6. If no matching (n+1)-grams found, input text n-gram is reduced by an order of 1 (i.e. n=n-1) and steps 3-5 are repeated until n=1, otherwise:
+        a. Calculate conditional probabilities for words that complete observed (n+1)-grams 
+        b. Calculate conditional probabilities for words that complete unobserved (n+1)-grams
+        c. Select the terminating word from observed/unobserved (n+1)-gram with the highest probability
+  7. If word is not in corpus, compute output word probabilities from raw frequency totals of uni-grams
+
+[*See here for how conditional probabilities are calculated for an n=2 Katz Back-Off Model*](https://rstudio-pubs-static.s3.amazonaws.com/271652_1525c0598da74774bfa4047803cee0d5.html)
+
+# **Development Process**
+
+## Data Pre-processing
+
+The word prediction algorithm utilises text sourced from blogs, the news and twitter. These datasets were provided as part of the Capstone dataset. In the present analysis, only 10% of the lines were imported from each dataset. 
+
+```{r import_data, include=TRUE,  eval = TRUE, echo = TRUE, cache = TRUE}
+
+# proportion of lines to read in
+readprop <- 0.1
+#document details
+lang = "en_US"; source_list = c("news","blogs","twitter")
+
+# Output file location
+filepath <- paste0("data/",lang,"/modelling/"); 
+if(!dir.exists(filepath)) dir.create(file.path(filepath), recursive = TRUE)
+
+#Sample Texts
+all_texts <- data.frame(matrix(ncol=5,nrow=3, 
+              dimnames=list(NULL, c("text", "source", "lines", "prop", "size"))))
+for (i in 1:3){
+        # data location
+        datdir <- paste0("data/",lang,"/",lang,".",source_list[i],".txt")
+        # Sample 50% of lines
+        all_texts$lines[i] <- sapply(datdir,countLines)        
+        all_texts$text[i] <- paste(readLines(datdir,
+                                             round(readprop*all_texts$lines[i]), 
+                                             encoding="UTF-8"),collapse=" ")
+        all_texts$source[i] <- source_list[i]
+        all_texts$size[i] <- paste0(round(file.info(datdir)$size / 1024.0 ^ 2,2),"MB")
+        all_texts$prop[i] <- readprop
+}
+```
+
+The metadata of each text file was also extracted:
+
+```{r metadata, include=TRUE, echo = FALSE, eval = TRUE}
+# Metadata
+all_texts %>% select(-text,-prop)
+```
+
+The three texts were combined into a single corpus and tagged with their source (e.g. "twitter) in the metadata. The corpus was then tokenised by word, with punctuation, symbols, numbers, urls and separators removed.
+
+```{r tokenise, include=TRUE, echo = TRUE,  eval = FALSE, cache = FALSE}
+# Create corpus
+doc.corpus <- corpus(all_texts, text_field = "text")
+docnames(doc.corpus) <- docvars(doc.corpus, "source")
+
+# Tokenise corpus into words
+doc.tokens <- tokens(doc.corpus,
+                     what = "fasterword",
+                     remove_punct = TRUE,
+                     remove_symbols = TRUE,
+                     remove_numbers = TRUE,
+                     remove_url = TRUE,
+                     remove_separators = TRUE)
+```
+
+As the task was to create a word prediction algorithm that excluded profanities, it was then necessary to standardise the word tokens by converting them to lower case, and then use the quanteda package tokens_select function to restrict the tokenised corpus to "clean" words from the English dictionary.
+
+```{r token_select, include=TRUE, echo = TRUE,  eval = FALSE, cache = FALSE}
+
+doc.tokens.lo <- tokens_tolower(doc.tokens)
+
+if(!file.exists("data/en_US/profanity_list")){
+        url <- "https://raw.githubusercontent.com/shutterstock/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words/master/en"
+        download.file(url, "data/en_US/profanity_list")
+}
+profanity_list <- data.frame(read.csv("data/en_US/profanity_list.csv", header = FALSE, sep = ","))
+
+#remove profanities
+doc.tokens.lo.rm <- tokens_select(doc.tokens.lo, profanity_list$V1, selection = "remove")
+
+#Keep only english words
+doc.tokens.clean <- tokens_select(doc.tokens.lo.rm, GradyAugmented, selection = "keep")
+```
+
+The processed corpus was then tokenised into a document frequency matrix (dfm) containing n-grams for n=1,2,3,4. Separate frequency tables were then created for the complete corpus and the individual source texts. To reduce the size of the corpus and increase the speed of the prediction algorithms, only n-grams with a frequency of 3 or more were retained. 
+
+```{r freq_table, include=TRUE, echo = TRUE, eval = FALSE, cache = FALSE}
+# Create n-grams - unigram to pentagram - and convert to a DFM
+doc.dfm <- dfm(tokens_ngrams(doc.tokens.clean, n=1:4))
+
+# Create frequency tables - by source
+freq.table_by_source <- tibble(textstat_frequency(doc.dfm, groups = source))  %>% dplyr::mutate(ngram = str_count(feature,"_")+1) %>% select(feature,frequency,group,ngram)
+freq.table <- tibble(textstat_frequency(doc.dfm))  %>% dplyr::mutate(ngram = str_count(feature,"_")+1) %>%
+        select(feature,frequency,ngram)
+```
+
+```{r read_freq_table, include=TRUE, echo = FALSE, eval = TRUE, cache = TRUE}
+rm(all_texts); gc()
+#user settings
+ngram <- 1:4
+readprop <- 0.1
+lang = "en_US"; 
+source_list = c("news","blogs","twitter")
+filepath <- paste0("data/",lang,"/",sprintf("prop_%1.3f/",readprop))
+doc.tokens.clean <- readRDS(paste0(filepath,"doc_corpus_clean.rds"))
+freq.table <- readRDS(paste0(filepath,"ngram_",paste(ngram,collapse="_"),".rds"))
+freq.table_by_source<- readRDS(paste0(filepath,"ngram_",paste(ngram,collapse="_"),"_by_source.rds"))
+
+```
+
+A summary of the n-gram frequency tables is given below for the combined text sources:
+
+```{r summary_freq_tables, include=TRUE, echo = FALSE, eval = TRUE, cache = TRUE}
+
+knitr::kable(freq.table %>% mutate(group = "All") %>% 
+               group_by(ngram) %>% summarise(Rows = n()))
+
+```
+and each individual text source:
+```{r summary_freq_by_source_tables, include=TRUE, echo = FALSE, eval = TRUE, cache = TRUE}
+
+knitr::kable(freq.table_by_source %>% 
+               group_by(ngram,group) %>% summarise(Rows = n()))
+
+```
+
+From these tables, we note that blogs have the highest number of unique n-grams across all orders, however, the table below shows it also has the highest number of characters:
+
+```{r character_count_by_source, include=TRUE, echo = FALSE, eval = TRUE, cache = TRUE}
+
+knitr::kable(freq.table_by_source %>% mutate(char = nchar(feature) - ngram + 1) %>% 
+               group_by(group) %>% summarise(characters = sum(char)))
+
+```
+
+
+## Exploratory Analysis
+
+In this section, the n-grams in the text corpus are explored for each source text.
+
+```{r fun_generate_ft, include=TRUE, echo = FALSE, eval = TRUE, cache = TRUE}
+
+
+explore_ngrams <- function(doc.tokens,ngrams){
+        
+        # @doc.tokens: quanteda token object
+        # @ngrams: vector specifying number of ngrams
+        
+        output <- list()
+        
+        # Create n-grams and convert to a DFM
+        doc.dfm <- dfm(tokens_ngrams(doc.tokens, n=ngrams))
+  
+        # Create frequency tables
+        output$freq.table_by_group <- tibble(textstat_frequency(doc.dfm, 
+                                                                groups = source)) %>% 
+                                      group_by(group) %>% 
+                mutate(count = sum(frequency), nn = 1) %>% mutate(fd = frequency / count) %>%
+                arrange(group, desc(fd)) %>%  mutate(rank = cumsum(nn), rankf = rank / max(rank),
+                                                     fds = cumsum(fd))
+        
+        output$freq.table <- tibble(textstat_frequency(doc.dfm)) %>% 
+                  arrange(desc(frequency)) %>%
+                mutate(fd = frequency / sum(frequency), fds = cumsum(fd), nn = 1,
+                       rank = cumsum(nn), rankf = rank / max(rank), group = "All")
+        
+        rm(doc.dfm)
+        
+        gc()
+        
+        return(output)
+        
+}
+```
+
+
+
+```{r unigram_output, include=TRUE, echo = FALSE, cache = TRUE}
+# Create Word cloud Plot Object
+
+output_uni <- explore_ngrams(doc.tokens.clean,1)
+
+```
+
+```{r bigram_output, include=TRUE, echo = FALSE, cache = TRUE}
+# Create Word cloud Plot Object
+
+output_bi <- explore_ngrams(doc.tokens.clean,2)
+```
+
+```{r trigram_output, include=TRUE, echo = FALSE, cache = TRUE}
+# Create Word cloud Plot Object
+
+output_tri <- explore_ngrams(doc.tokens.clean,3)
+```
+
+```{r quadgram_output, include=TRUE, echo = FALSE,  cache = TRUE}
+# Create Word cloud Plot Object
+
+output_quad <- explore_ngrams(doc.tokens.clean,4)
+```
+
+
+
+```{r word_cloud_gen, include=TRUE, echo = FALSE, cache = TRUE}
+# Create Word cloud Plot Object
+
+wordcloud_obj <- function(freq.table,n,source,size,minsize,wsize,gridsize){
+        if (source == "All") {
+                f <-    data.frame(freq.table) %>% 
+                        arrange(desc(frequency)) %>% 
+                        select(feature,frequency) %>% top_n(n,frequency)        
+        } else {
+                f <- data.frame(freq.table) %>% filter(group == source) %>% 
+                        arrange(desc(frequency)) %>% 
+                        top_n(n,frequency) %>% select(feature,frequency)                
+        } 
+        
+        set.seed(100)
+        wc <- wordcloud2(f,size = size, minRotation = -pi/4,
+                         maxRotation = -pi/4, widgetsize = c(wsize,wsize),
+                         shape = "circle",gridSize = gridsize,
+                         minSize = minsize)
+        saveWidget(wc,"tmp.html",selfcontained = F)
+        webshot("tmp.html","tmp.png", delay =1, vwidth = 480, vheight=480)
+        wc_plt_obj <- ggdraw() + draw_image("tmp.png", scale = 0.9)
+        
+        rm(wc);rm(f)
+        
+        gc()
+        return(wc_plt_obj)
+
+}
+
+nwords <- 100
+size_wc <- list(1.2,0.7,0.5,0.3)
+minsize_wc <- list(1.2,0.7,0.5,0.3)
+gridsize_wc <- list(11,11,9,6)
+wdsize_wc <- list(500,480,480,480)
+
+wc_uni <- list(); wc_bi <- list(); wc_tri <- list(); wc_quad <- list()
+for (i in c("news","blogs","twitter")){
+        wc_uni[[i]] <- wordcloud_obj(output_uni$freq.table_by_group,nwords,i,
+                                      size_wc[[1]],minsize_wc[[1]],wdsize_wc[[1]],gridsize_wc[[1]])
+        wc_bi[[i]] <- wordcloud_obj(output_bi$freq.table_by_group,nwords,i,
+                                     size_wc[[2]],minsize_wc[[2]],wdsize_wc[[2]],gridsize_wc[[2]])
+        wc_tri[[i]] <- wordcloud_obj(output_tri$freq.table_by_group,nwords,i,
+                                      size_wc[[3]],minsize_wc[[3]],wdsize_wc[[3]],gridsize_wc[[3]])
+        wc_quad[[i]] <- wordcloud_obj(output_quad$freq.table_by_group,nwords,i,
+                                       size_wc[[4]],minsize_wc[[4]],wdsize_wc[[4]],gridsize_wc[[4]])
+}
+
+wc_uni[["All"]] <- wordcloud_obj(output_uni$freq.table,nwords,"All",
+                                  size_wc[[1]],minsize_wc[[1]],
+                                  wdsize_wc[[1]],gridsize_wc[[1]])
+wc_bi[["All"]] <- wordcloud_obj(output_bi$freq.table,nwords,"All",
+                                 size_wc[[2]],minsize_wc[[2]],
+                                 wdsize_wc[[2]],gridsize_wc[[2]])
+wc_tri[["All"]] <- wordcloud_obj(output_tri$freq.table,nwords,"All",
+                                  size_wc[[3]],minsize_wc[[3]],
+                                  wdsize_wc[[3]],gridsize_wc[[3]])
+wc_quad[["All"]] <- wordcloud_obj(output_quad$freq.table,nwords,"All",
+                                   size_wc[[4]],minsize_wc[[4]],
+                                   wdsize_wc[[4]],gridsize_wc[[4]])
+```
+
+```{r freq_bar_plot_gen, include=TRUE, echo = FALSE, cache = TRUE}
+# Create Frequency Bar Plot Object
+
+nwords <- 100
+barplt_obj <- function(freq.table, freq.table_by_group, nwords){
+        
+        src_txt <- c("blogs","news","twitter","All")
+        src_clr <- c("green","red","blue","grey")
+        
+        freq.table_by_group <- freq.table_by_group %>% filter(rank <= nwords)
+        freq.table <- freq.table %>% filter(rank <= nwords)
+        return(ggplot(freq.table_by_group) +
+                       geom_bar(aes(x=rank, y=frequency, fill=group), width = 0.2 , 
+                                stat = "identity") +
+                       geom_bar(data = freq.table, 
+                                aes(x=rank, y=frequency, fill=group), width = 0.2 , 
+                                stat = "identity")+ facet_wrap(~group, ncol = 4) +
+                       scale_fill_manual(breaks = src_txt, values = src_clr) + 
+                       theme_bw() + theme(axis.line = element_line(colour = "black"),
+                          panel.background = element_blank(),legend.position = "none") +      
+                       labs(x = "Rank", y = "Frequency", color = "Text Source"))
+}
+
+bp_uni <- barplt_obj(output_uni$freq.table,output_uni$freq.table_by_group,nwords)
+bp_bi <- barplt_obj(output_bi$freq.table,output_bi$freq.table_by_group,nwords)
+bp_tri <- barplt_obj(output_tri$freq.table,output_tri$freq.table_by_group,nwords)
+bp_quad <- barplt_obj(output_quad$freq.table,output_quad$freq.table_by_group,nwords)
+
+```
+
+```{r cdf_plot_gen, include=TRUE, echo = FALSE, cache = TRUE}
+# Create Frequency Bar Plot Object
+
+cdfplt_obj <- function(freq.table, freq.table_by_group, wordpct){
+        
+        src_txt <- c("blogs","news","twitter","All")
+        src_clr <- c("green","red","blue","grey")
+        
+        freq.table_by_group <- freq.table_by_group %>% filter(rankf <= wordpct)
+        freq.table <- freq.table  %>% filter(rankf <= wordpct)
+        
+        gc()
+        
+        return(ggplot(freq.table_by_group, 
+                      aes(x=rankf,y=fds, colour = group)) + geom_line(size=1.1) +
+                       geom_line(data = freq.table, 
+                        aes(x=rankf, y = fds, colour = group),alpha = 0.7, size=2.5) +
+                       scale_color_manual(breaks = src_txt, values = src_clr) + theme_bw() +
+                       theme(axis.line = element_line(colour = "black"),
+                             panel.background = element_blank()) +      
+                       labs(x = "Percentile", y = "CDF", color = "Text Source"))
+}
+
+wordpct <- 0.2
+cdf_uni <- cdfplt_obj(output_uni$freq.table,output_uni$freq.table_by_group,wordpct)
+cdf_bi <- cdfplt_obj(output_bi$freq.table,output_bi$freq.table_by_group,wordpct)
+cdf_tri <- cdfplt_obj(output_tri$freq.table,output_tri$freq.table_by_group,wordpct)
+cdf_quad <- cdfplt_obj(output_quad$freq.table,output_quad$freq.table_by_group,wordpct)
+
+```
+
+### Uni-grams
+
+**Wordcloud**
+```{r unigram_wc_plot, include=TRUE, echo = FALSE, eval = TRUE, cache = FALSE, fig.align='center', fig.height=5, fig.width=12, fig.cap="**Figure 1**: Word cloud of 100 most frequent unigrams"}
+ggpubr::ggarrange(wc_uni[["All"]],wc_uni[["blogs"]], wc_uni[["news"]], wc_uni[["twitter"]], 
+                               ncol = 4, nrow = 1,labels = c("All","blogs","news","twitter"),
+                               vjust = 5, hjust = -0.5)
+```
+
+As expected, typical "stopwords" are the most common uni-grams across all source texts.
+
+**Frequency Plots**
+```{r unigram_freq_plot, include=TRUE, echo = FALSE, eval = TRUE, cache = FALSE, fig.align='center', fig.height=5, fig.width=12, fig.cap="**Figure 2**: Uni-gram Frequency Plots; (left) unigram frequencies for top 100 most frequent uni-grams, (right) cumulative frequency density up to 20th percentile of uni-grams."}
+grid.arrange(arrangeGrob(bp_uni,cdf_uni, widths = c(0.7,0.3)),nrow=1)
+```
+
+Additionally, the frequency plots show that the source texts have a similar distribution of uni-grams. 5% of uni-grams contribute to nearly 90% of the total uni-gram frequency in all source texts except news where it is closer to 80%.
+
+### Bi-grams
+
+**Wordcloud**
+```{r bigram_wc_plot, include=TRUE, echo = FALSE, eval = TRUE, cache = FALSE, fig.align='center', fig.height=5, fig.width=12, fig.cap="**Figure 3**: Word cloud of 100 most frequent bi-grams"}
+ggpubr::ggarrange(wc_bi[["All"]],wc_bi[["blogs"]], wc_bi[["news"]], wc_bi[["twitter"]], 
+                               ncol = 4, nrow = 1,labels = c("All","blogs","news","twitter"),
+                               vjust = 5, hjust = -0.5)
+```
+
+While blogs and news show similar bi-grams, twitter appears to have diverged. This perhaps reflects the unique speech patterns observed on the Twitter platform.
+
+**Frequency Plots**
+```{r bigram_freq_plot, include=TRUE, echo = FALSE, eval = TRUE, cache = FALSE, fig.align='center', fig.height=5, fig.width=12, fig.cap="**Figure 4**: Bi-gram Frequency Plots; (left) unigram frequencies for top 100 most frequent bi-grams, (right) cumulative frequency density up to 20th percentile of bi-grams."}
+grid.arrange(arrangeGrob(bp_bi,cdf_bi, widths = c(0.7,0.3)),nrow=1)
+```
+
+The bi-gram frequency plots reflect this divergence as the most frequent Twitter bi-grams have notably less instances than the top-ranked in blogs and news texts. However, the distribution of Twitter bi-grams after this initial peak ends up following the blogs distribution quite closely.
+
+### Tri-grams
+
+**Wordcloud**
+```{r trigram_wc_plot, include=TRUE, echo = FALSE, eval = TRUE, cache = FALSE, fig.align='center', fig.height=5, fig.width=12, fig.cap="**Figure 5**: Word cloud of 100 most frequent tri-grams."}
+ggpubr::ggarrange(wc_tri[["All"]],wc_tri[["blogs"]], wc_tri[["news"]], wc_tri[["twitter"]], 
+                               ncol = 4, nrow = 1,labels = c("All","blogs","news","twitter"),
+                               vjust = 5, hjust = -0.5)
+```
+
+Again, blogs and news texts show very similar tri-grams, whereas twitter appears to have a completely different selection of most frequency tri-grams. 
+
+**Frequency Plots**
+```{r trigram_freq_plot, include=TRUE, echo = FALSE, eval = TRUE, cache = FALSE, fig.align='center', fig.height=5, fig.width=12, fig.cap="**Figure 6**: Tri-gram Frequency Plots; (left) tri-gram frequencies for top 100 most frequent tri-grams, (right) cumulative frequency density up to 20th percentile of tri-grams."}
+grid.arrange(arrangeGrob(bp_tri,cdf_tri, widths = c(0.7,0.3)),nrow=1)
+```
+
+The frequency of tri-grams is notably lower than that of uni-grams and bi-grams. The news frequency distribution remains distinct from blogs and twitter - with the higher variation in text patterns (perhaps signifying more advanced/complex communication)resulting in a lowwer curve.
+
+### Quad-grams
+
+**Wordcloud**
+```{r quadgram_wc_plot, include=TRUE, echo = FALSE, eval = TRUE, cache = FALSE, fig.align='center', fig.height=5, fig.width=12, fig.cap="**Figure 7**: Quad-gram Word cloud"}
+ggpubr::ggarrange(wc_quad[["All"]],wc_quad[["blogs"]], wc_quad[["news"]], wc_quad[["twitter"]], 
+                               ncol = 4, nrow = 1,labels = c("All","blogs","news","twitter"),
+                               vjust = 5, hjust = -0.5)
+```
+
+Blogs and news retain similar quad-grams. Twitter continues to have a notably distinct grouping.
+
+**Frequency Plots**
+```{r quadgram_freq_plot, include=TRUE, echo = FALSE, eval = TRUE, cache = FALSE, fig.align='center', fig.height=5, fig.width=12, fig.cap="**Figure 8**: Quad-gram Frequency Plots; (left) quad-gram frequencies for top 100 most frequent quad-grams, (right) cumulative frequency density up to 20th percentile of quad-grams."}
+grid.arrange(arrangeGrob(bp_quad,cdf_quad, widths = c(0.7,0.3)),nrow=1)
+```
+
+The number of instances of the most frequent quad-grams is significantly lower than the lower order n-grams across all source texts. The linear relationship between the CDF and percentile (just before the 5th percentile) corresponds to quad-grams with a single instance. This also suggests that going to higher order n-grams (i.e. penta-grams) is unlikely to improve the performance of the model algorithm (for the given training dataset).
+
+### Modelling
+
+```{r sample_text_inputs, include=TRUE, echo = FALSE, eval = TRUE, cache = FALSE}
+text.input_list <- c("Thank you for","Follow me","and a case of")
+```
+
+The word prediction alogrithms are tested with a set of three text inputs:
+
+- "Thank you for"
+- "Follow me"
+- "and a case of"
+
+```{r import_model_scripts, include=TRUE, echo = FALSE, eval = TRUE, cache = FALSE}
+source("_XX_Helper_Scripts/ngram_kbo_DF.R")
+source("_XX_Helper_Scripts/ngram_mc_DF.R")
+source("_XX_Helper_Scripts/unigram_pred.R")
+source("_XX_Helper_Scripts/unigram_kbo.R") 
+```
+
+for four different training corpuses:
+
+1. Combined texts (i.e. blogs, news and twitter)
+2. Blogs
+3. News
+4. Twitter
+
+
+```{r compute_word_pred_all, include=TRUE, echo = FALSE, eval = TRUE, cache = TRUE}
+
+results_list_kbo <- list()
+results_list_mc <- list()
+
+for (i in seq_along(text.input_list)) {
+        results_list_kbo[[i]] <- data.frame(ngram_kbo_DF(text.input_list[i],freq.table,5,3))
+        results_list_mc[[i]] <- data.frame(ngram_mc_DF(text.input_list[i],freq.table,5,3))
+        names(results_list_kbo[[i]]) <- c("word.Comb","prob.Comb")
+        names(results_list_mc[[i]]) <- c("word.Comb")
+        results_list_kbo[[i]]$prob.Comb <- round(results_list_kbo[[i]]$prob.Comb,2)
+}
+
+for (source in c("blogs","news","twitter")){
+        for (i in seq_along(text.input_list)) {
+                tmpkbo <- data.frame(col1 = replicate(nrow(results_list_kbo[[i]]),NA),
+                                     col2 = replicate(nrow(results_list_kbo[[i]]),NA))
+                tmpmc <- data.frame(col1 = replicate(nrow(results_list_mc[[i]]),NA))
+                names(tmpkbo) <- paste0(c("word.","prob."),source)
+                names(tmpmc) <- paste0(c("word."),source)                
+                tmp1 <- data.frame(ngram_kbo_DF(text.input_list[i],freq.table_by_source %>% filter(group == source),5,3))
+                tmp2 <- data.frame(ngram_mc_DF(text.input_list[i],freq.table_by_source %>% filter(group == source),5,3))
+                
+
+                tmpkbo[1:nrow(tmp1),1:2] <- tmp1
+                tmpmc[1:nrow(tmp2),1] <- tmp2
+                results_list_kbo[[i]] <- cbind(results_list_kbo[[i]],tmpkbo)
+                results_list_mc[[i]] <- cbind(results_list_mc[[i]],tmpmc)
+                
+                results_list_kbo[[i]][,paste0("prob.",source)] <- round(results_list_kbo[[i]][,paste0("prob.",source)],2)
+        }
+}
+
+```
+
+"**Thank you for**"
+
+*Markov Chain*
+```{r output_word_pred_mc_1, include=TRUE, echo = TRUE, eval = TRUE, cache = FALSE}
+
+results_list_mc[[1]]
+
+```
+
+*Katz Back-Off*
+```{r output_word_pred_kbo_1, include=TRUE, echo = TRUE, eval = TRUE, cache = FALSE}
+
+results_list_kbo[[1]]
+
+```
+
+"**Follow me**"
+
+*Markov Chain*
+```{r output_word_pred_mc_2, include=TRUE, echo = TRUE, eval = TRUE, cache = FALSE}
+
+results_list_mc[[2]]
+
+```
+
+*Katz Back-Off*
+```{r output_word_pred_kbo_2, include=TRUE, echo = TRUE, eval = TRUE, cache = FALSE}
+
+results_list_kbo[[2]]
+
+```
+
+"**and a case of**"
+
+*Markov Chain*
+```{r output_word_pred_mc_3, include=TRUE, echo = TRUE, eval = TRUE, cache = FALSE}
+
+results_list_mc[[3]]
+
+```
+
+*Katz Back-Off*
+```{r output_word_pred_kbo_3, include=TRUE, echo = TRUE, eval = TRUE, cache = FALSE}
+
+results_list_kbo[[3]]
+
+```
+
+
+**Model Comparisons**
+
+The output of the Markov Chain (w/ Stupid Back-Off) and Katz Back-Off model is almost identical for the top three predicted words. From the Katz Back-Off algorithm we also find that the conditional probability of the top word is usually significantly higher than the bottom four words. However, the limitations of the Markov Chain model are also apparent, as the word predictions for the text input "Follow me" is limited to a list of two, whereas the Katz Back-Off model returns five predictions as a result of using unobserved n-grams in the model prediction.
+
+**Source Text Comparisons**
+
+The top five word predictions generated by the combined corpus generally differs from the model predictions when a single source text is used. This will be a consideration of the final algorithm, as it is well-known that speech patterns will differ between communication platforms (e.g. the bigram input "Follow me back" is a commonly used phrase on Twitter). Ergo, a word prediction tool may benefit (in regards to usability) from using a text corpus comprised of text sourced specifically from the target platform.
+
+## **App Implementation**
+
+With respect to app implementation, the following issues will be addressed:
+
+- **Size of dataset**
+  - Reducing the size of the n-gram frequency tables can help app usability with respect to both prediction speed and memory requirements. Eliminating features below a cut-off frequency can significantly reduce the size of the dataset. This will be a consideration during app implementation
+- **Model Selection**
+  - Model complexity is a key driver of prediction speed.The Markov Chain model with Stupid Back-Off is faster than the Katz Back-Off model as it searches through only one n-gram order per prediction loop as opposed to two. Additionally, it does not require probability computations. However, a simple Markov chain model struggles compared to the Katz Back-Off model with training datasets where low frequency features have been eliminated as it does not include un-observed n-grams.
+- **Accuracy**
+  - The model accuracy can be tested by predicting n-grams in a test dataset. This test dataset would be drawn from the 90% of lines in the source texts that were not included in the training dataset
+  
+# **Appendix**
+
+```{r helper_scripts, include=TRUE, echo = TRUE, eval = TRUE, cache = FALSE}
+
+# =============================        
+# Dynamic Katz Back-Off Model
+# ============================= 
+ngram_kbo_DF <- function(text.input,freq.table,nwords,len=3){
+        
+        
+        text.input <- iconv(text.input, from = "UTF-8", to = "ASCII", sub = "")
+        text.token <- tokens(char_tolower(text.input), 
+                             remove_punct = TRUE, 
+                             remove_symbols = T, 
+                             remove_separators = T, 
+                             remove_twitter = T, 
+                             remove_hyphens = T, 
+                             remove_numbers = T)
+        
+        text.token <- as.vector(unlist(text.token))
+        
+        text.n <- length(text.token)
+        
+        nDisc = 0.5
+        nloDisc = 0.5
+        
+        # 1.a Split frequency table by ngram
+        #select maximum ngram order to inspect in frequency table
+        ngram_max <- min(len+1,max(freq.table$ngram))
+        ft_list <- list()
+        #create list of ngram frequency tables
+        for (j in 1:ngram_max){
+                ft_list[[j]] <- freq.table %>% filter(ngram == j)
+        }
+        rm(freq.table)
+        
+        # Extract observed n-gram and discounted probability     
+        i=0
+        len <- min(text.n,len)         
+        if(len>0){i = text.n-len}        
+        while (0 < text.n - i){
+                #convert text input into ngram format
+                text.ngram <- paste0(tail(text.token,text.n-i),collapse="_")
+                text.ngram.lo <- paste0(tail(text.token,text.n-i-1),collapse="_")
+                
+                message("Searching for ngram... ", text.ngram)
+                
+                # 1b. Create dynamic ngram tables
+                freq.table_lo_p1 <- ft_list[[max(text.n - i + 1,1)]]
+                freq.table_lo <- ft_list[[max(text.n - i,1)]]
+                freq.table_lo_m1 <- ft_list[[max(text.n - i - 1,1)]]
+                freq.table_uni <- ft_list[[1]]
+                
+                ngram_match <- freq.table_lo %>% filter(feature == text.ngram)
+                ngramlo_match <- freq.table_lo_m1 %>% filter(feature == text.ngram.lo)
+                # =============================
+                # If word exists in corpus - Katz Back-Off Model
+                # =============================        
+                if(nrow(ngram_match)>0){
+                        
+                        # 2. find observed ngram predictions (i.e. (n+1)-gram) and compute discounted probability
+                        ngram_Obs_pred <- freq.table_lo_p1 %>% filter(grepl(paste0("^",text.ngram,"_"),feature)) %>%
+                                dplyr::mutate(prob.pred = ((frequency - nDisc) / ngram_match$frequency),
+                                              next.word = gsub(paste0("^",text.ngram,"_"),"",feature), feature.pred = feature) 
+                        # =============================        
+                        # If text input is a single word - Unigram Katz Back-Off Model
+                        # =============================                         
+                        if (nrow(ngram_Obs_pred)>0 && text.n-i == 1){
+                                ngram_pred <- unigram_KBO(freq.table_uni,text.token,text.ngram,ngram_Obs_pred)
+                                return(ngram_pred[1:min(nwords,nrow(ngram_pred)), c("next.word","prob.pred")])
+                                
+                                # =============================        
+                                # Dynamic Katz Back-Off Model
+                                # =============================                            
+                        } else if (nrow(ngram_Obs_pred)>0 && text.n-i > 1) {
+                                
+                                message("Running Dynamic Katz Back-Off Model")
+        
+                                # 3. find unobserved n-gram predictions i.e. possible (n+1) word of n-gram input
+                                #    Need to extract unigrams not in list of predicted next word from observed ngram predictions 
+                                ngram_unObs_tail <- freq.table_uni %>% filter(!(feature %in% ngram_Obs_pred$next.word))
+                                # 4. Calculate discounted probability mass - weighting for unobserved n-grams
+                                #    Computed from observed n-grams that form the tail (i.e. n-1) of the n-gram input
+                                prob_mass <- freq.table_lo %>% filter(grepl(paste0("^",text.ngram.lo,"_"),feature)) %>%
+                                        summarise(alpha = 1 - (sum(frequency - nloDisc) / ngramlo_match$frequency))
+                                # 5. Calculate backed-off probabilities for n-grams
+                                # 5a. Generated backed-off n-grams using the unobserved (n+1)-gram tails - see (3)
+                                ngram_Bo <-ngram_unObs_tail %>% dplyr::mutate(feature.BO.ngram = paste(text.ngram.lo, feature, sep = "_"))
+                                # 5b. Extract observed frequencies of backed-off n-grams
+                                ngram_Bo_Obs <- freq.table_lo %>% filter(feature %in% ngram_Bo$feature.BO.ngram,
+                                                                         str_count(feature,"_") > 0)
+                                # 5c. Identify unobserved backed-off n-grams - using 5b
+                                ngram_Bo_unObs <- ngram_Bo %>% filter(!(feature.BO.ngram %in% ngram_Bo_Obs$feature)) %>% 
+                                        dplyr::mutate(feature =  feature.BO.ngram) %>% select(-feature.BO.ngram)
+                                # 5d. Generate probabilities of observed backed-off n-grams
+                                ngram_Bo_Obs <- ngram_Bo_Obs %>% dplyr::mutate(prob  = ifelse(frequency>0,(frequency - nloDisc) / ngramlo_match$frequency,0))
+                                # 5e. Generate probabilities of unobserved backed-off n-grams 
+                                ngram_Bo_unObs <-ngram_Bo_unObs %>% dplyr::mutate(prob = prob_mass$alpha * frequency / sum(frequency) )
+                                # Combine observed and unobserved n-grams
+                                ngram_Bo <- rbind(ngram_Bo_Obs,ngram_Bo_unObs)
+                                # 6. Calculate (n+1)-gram probability discount mass - using observed (n+1)-gram probabilities
+                                prob_mass <- prob_mass %>% dplyr::mutate(alpha2 = 1 - sum(ngram_Obs_pred$prob.pred))
+                                # 7. Calculate unobserved backed-off (n+1)-gram probabilities
+                                ngram_Bo_unObs_pred <- ngram_Bo %>% dplyr::mutate(feature.pred = paste(text.token[1],feature,sep="_"),
+                                                                                  prob.pred = prob_mass$alpha2*prob / sum(prob))
+                                # 8. Select prediction with highest probability
+                                # Clean data frames
+                                ngram_Bo_unObs_pred <- ngram_Bo_unObs_pred %>% dplyr::mutate(next.word = sub(".*_", "",feature.pred)) %>%
+                                        select(feature,frequency,feature.pred,prob.pred,next.word)
+                                ngram_pred <- ngram_Obs_pred %>% select(feature,frequency,feature.pred,prob.pred,next.word) %>% 
+                                        rbind(ngram_Bo_unObs_pred) %>% arrange(desc(prob.pred))
+                                return(ngram_pred[1:min(nwords,nrow(ngram_pred)), c("next.word","prob.pred")])
+                        }
+                }
+                i = i + 1
+                message(text.n - i)
+        }
+        message("Running Unigram Model")                                
+        ngram_pred <- unigram_pred(freq.table_uni,text.token)
+        return(ngram_pred[1:min(nwords,nrow(ngram_pred)), c("next.word","prob.pred")])        
+        
+}
+
+# =============================        
+# Unigram Katz Back-Off Model
+# ============================= 
+unigram_KBO <- function(freq.table,text.input,text.ngram,ngram_Obs_pred){
+        prob_mass<- data.frame(alpha= 1 - sum(ngram_Obs_pred$prob.pred))
+        ngram_Bo_unObs <- freq.table %>% filter(ngram == 1, !(feature %in% ngram_Obs_pred$next.word)) %>% 
+                mutate(prob.pred = prob_mass$alpha * frequency / sum(frequency),
+                       next.word = feature, feature.pred = paste(feature,text.ngram,sep="_")) %>%
+                select(feature,frequency,feature.pred,prob.pred,next.word)
+        ngram_Bo_unObs
+        ngram_pred <- ngram_Obs_pred %>% select(feature,frequency,feature.pred,prob.pred,next.word) %>%
+                rbind(ngram_Bo_unObs) %>% arrange(desc(prob.pred))
+        return(ngram_pred)
+}
+
+# =============================        
+# Generate prediction from most frequent words in corpus
+# =============================  
+unigram_pred <- function(freq.table,text.input){
+        ngram_pred <- freq.table %>% filter(ngram == 1) %>% mutate(prob.pred = frequency / sum(frequency),
+                                                           feature.pred = paste(text.input,feature,sep="_"),
+                                                           next.word = feature) %>%
+        select(feature,frequency,feature.pred,prob.pred,next.word) %>% arrange(desc(prob.pred))
+        
+        return(ngram_pred)
+}
+
+# =============================        
+# Markov Chain Model
+# ============================= 
+ngram_mc_DF <- function(text.input,freq.table,nwords,len=3){
+        
+        
+        text.input <- iconv(text.input, from = "UTF-8", to = "ASCII", sub = "")
+        text.token <- tokens(char_tolower(text.input), 
+                             remove_punct = TRUE, 
+                             remove_symbols = T, 
+                             remove_separators = T, 
+                             remove_twitter = T, 
+                             remove_hyphens = T, 
+                             remove_numbers = T)
+        
+        text.token <- as.vector(unlist(text.token))
+        
+        text.n <- length(text.token)
+        
+        nDisc = 0.5
+        nloDisc = 0.5
+        
+        # 1.a Split frequency table by ngram
+        #select maximum ngram order to inspect in frequency table
+        ngram_max <- min(len+1,max(freq.table$ngram))
+        ft_list <- list()
+        #create list of ngram frequency tables
+        for (j in 1:ngram_max){
+                ft_list[[j]] <- freq.table %>% filter(ngram == j)
+        }
+        rm(freq.table)
+        
+        # Extract observed n-gram and discounted probability
+        i=0
+        len <- min(text.n,len)        
+        if(len>0){i = text.n-len}
+        while (0 < text.n - i){
+                #convert text input into ngram format
+                text.ngram <- paste0(tail(text.token,text.n-i),collapse="_")
+                
+                message("Searching for ngram... ", text.ngram)
+                
+                ngram_match <- ft_list[[max(text.n - i + 1,1)]] %>% filter(grepl(paste0("^",text.ngram,"_"),feature))
+                
+                # =============================
+                # If word exists in corpus - Katz Back-Off Model
+                # =============================        
+                if(nrow(ngram_match)>0){
+                        ngram_pred <- ngram_match %>% mutate(next.word = gsub(paste0("^",text.ngram,"_"),"",feature)) %>%
+                                arrange(desc(frequency))
+                        return(ngram_pred[1:min(nwords,nrow(ngram_pred)), "next.word"])  
+                }
+                i = i + 1
+        }
+        message("Running Unigram Model")                                
+        ngram_pred <- unigram_pred(freq.table_uni,text.token)
+        return(ngram_pred[1:min(nwords,nrow(ngram_pred)), "next.word"])        
+        
+}
+
+
+
+```
+  
