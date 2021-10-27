@@ -51,7 +51,12 @@ shinyServer(function(input, output, session) {
             freq.table_in <- freq.table_by_source %>% filter(group == tolower(input$platform))
         }
         
-        text.input <- ifelse(input$text_input %in% c("", " "), "the",input$text_input)
+        if (input$text_input %in% c("", " ")){
+            freq.table_in[1:5,] %>% mutate( next.word = feature )
+
+        } else {
+        
+        text.input <- input$text_input
         
         tmp <- ngram_kbo_DF(text.input,freq.table_in,5,3)  
         
@@ -59,40 +64,36 @@ shinyServer(function(input, output, session) {
         pred.words$next.word[1:nrow(tmp)] <- tmp$next.word
         
         pred.words
+        }
         
     })    
     
     observeEvent(input$word1, {
-        if(input$text_input %in% c("", " ")){x <- "the"}
-        else{x <- word_preds()$next.word[1]}
+       x <- word_preds()$next.word[1]
         
         updateTextInput(session, "text_input", value = paste(input$text_input, x))
     })    
     
     observeEvent(input$word2, {
-        if(input$text_input %in% c("", " ")){x <- "to"}
-        else{x <- word_preds()$next.word[2]}
+       x <- word_preds()$next.word[2]
         
         updateTextInput(session, "text_input", value = paste(input$text_input, x))
     }) 
     
     observeEvent(input$word3, {
-        if(input$text_input %in% c("", " ")){x <- "and"}
-        else{x <- word_preds()$next.word[3]}
+        x <- word_preds()$next.word[3]
         
         updateTextInput(session, "text_input", value = paste(input$text_input, x))
     }) 
     
     observeEvent(input$word4, {
-        if(input$text_input %in% c("", " ")){x <- "a"}
-        else{x <- word_preds()$next.word[4]}
+        x <- word_preds()$next.word[4]
         
         updateTextInput(session, "text_input", value = paste(input$text_input, x))
     }) 
     
     observeEvent(input$word5, {
-        if(input$text_input %in% c("", " ")){x <- "of"}
-        else{x <- word_preds()$next.word[5]}
+        x <- word_preds()$next.word[5]
         
         updateTextInput(session, "text_input", value = paste(input$text_input, x))
     })     
