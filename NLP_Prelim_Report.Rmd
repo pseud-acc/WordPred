@@ -40,7 +40,7 @@ To generate the training corpus (generated from the news, blog and twitter sourc
 -  All profanities will be removed - design specification
 -  Punctuation and special characters will be removed - algorithm is restricted to predicting only text
 -  Contractions will be retained - contractions are common in everyday speech
--  Urls will be removed
+-  URLs will be removed
 -  Separators will be removed
 -  Whitespaces not discarded
 -  Word stemming not used - although word stemming reduces the size of a corpus, similar words are assumed identical whereas this is not the case in everyday speech
@@ -147,7 +147,7 @@ doc.tokens.lo.rm <- tokens_select(doc.tokens.lo, profanity_list$V1, selection = 
 doc.tokens.clean <- tokens_select(doc.tokens.lo.rm, GradyAugmented, selection = "keep")
 ```
 
-The processed corpus was then tokenised into a document frequency matrix (dfm) containing n-grams for n=1,2,3,4. Separate frequency tables were then created for the complete corpus and the individual source texts. To reduce the size of the corpus and increase the speed of the prediction algorithms, only n-grams with a frequency of 3 or more were retained. 
+The processed corpus was then tokenised into a document frequency matrix (dfm) containing n-grams for n=1,2,3,4. Separate frequency tables were then created for the complete corpus and the individual source texts. 
 
 ```{r freq_table, include=TRUE, echo = TRUE, eval = FALSE, cache = FALSE}
 # Create n-grams - unigram to pentagram - and convert to a DFM
@@ -420,7 +420,7 @@ ggpubr::ggarrange(wc_bi[["All"]],wc_bi[["blogs"]], wc_bi[["news"]], wc_bi[["twit
 While blogs and news show similar bi-grams, twitter appears to have diverged. This perhaps reflects the unique speech patterns observed on the Twitter platform.
 
 **Frequency Plots**
-```{r bigram_freq_plot, include=TRUE, echo = FALSE, eval = TRUE, cache = FALSE, fig.align='center', fig.height=5, fig.width=12, fig.cap="**Figure 4**: Bi-gram Frequency Plots; (left) unigram frequencies for top 100 most frequent bi-grams, (right) cumulative frequency density up to 20th percentile of bi-grams."}
+```{r bigram_freq_plot, include=TRUE, echo = FALSE, eval = TRUE, cache = FALSE, fig.align='center', fig.height=5, fig.width=12, fig.cap="**Figure 4**: Bi-gram Frequency Plots; (left) bi-gram frequencies for top 100 most frequent bi-grams, (right) cumulative frequency density up to 20th percentile of bi-grams."}
 grid.arrange(arrangeGrob(bp_bi,cdf_bi, widths = c(0.7,0.3)),nrow=1)
 ```
 
@@ -655,7 +655,8 @@ ngram_kbo_DF <- function(text.input,freq.table,nwords,len=3){
                         # 2. find observed ngram predictions (i.e. (n+1)-gram) and compute discounted probability
                         ngram_Obs_pred <- freq.table_lo_p1 %>% filter(grepl(paste0("^",text.ngram,"_"),feature)) %>%
                                 dplyr::mutate(prob.pred = ((frequency - nDisc) / ngram_match$frequency),
-                                              next.word = gsub(paste0("^",text.ngram,"_"),"",feature), feature.pred = feature) 
+                                              next.word = gsub(paste0("^",text.ngram,"_"),"",feature),
+                                              feature.pred = feature) 
                         # =============================        
                         # If text input is a single word - Unigram Katz Back-Off Model
                         # =============================                         
@@ -671,7 +672,7 @@ ngram_kbo_DF <- function(text.input,freq.table,nwords,len=3){
                                 message("Running Dynamic Katz Back-Off Model")
         
                                 # 3. find unobserved n-gram predictions i.e. possible (n+1) word of n-gram input
-                                #    Need to extract unigrams not in list of predicted next word from observed ngram predictions 
+                                #Need to extract unigrams not in list of predicted next word from observed ngram predictions 
                                 ngram_unObs_tail <- freq.table_uni %>% filter(!(feature %in% ngram_Obs_pred$next.word))
                                 # 4. Calculate discounted probability mass - weighting for unobserved n-grams
                                 #    Computed from observed n-grams that form the tail (i.e. n-1) of the n-gram input
@@ -679,7 +680,8 @@ ngram_kbo_DF <- function(text.input,freq.table,nwords,len=3){
                                         summarise(alpha = 1 - (sum(frequency - nloDisc) / ngramlo_match$frequency))
                                 # 5. Calculate backed-off probabilities for n-grams
                                 # 5a. Generated backed-off n-grams using the unobserved (n+1)-gram tails - see (3)
-                                ngram_Bo <-ngram_unObs_tail %>% dplyr::mutate(feature.BO.ngram = paste(text.ngram.lo, feature, sep = "_"))
+                                ngram_Bo <-ngram_unObs_tail %>% 
+                                  dplyr::mutate(feature.BO.ngram = paste(text.ngram.lo, feature, sep = "_"))
                                 # 5b. Extract observed frequencies of backed-off n-grams
                                 ngram_Bo_Obs <- freq.table_lo %>% filter(feature %in% ngram_Bo$feature.BO.ngram,
                                                                          str_count(feature,"_") > 0)
@@ -687,21 +689,27 @@ ngram_kbo_DF <- function(text.input,freq.table,nwords,len=3){
                                 ngram_Bo_unObs <- ngram_Bo %>% filter(!(feature.BO.ngram %in% ngram_Bo_Obs$feature)) %>% 
                                         dplyr::mutate(feature =  feature.BO.ngram) %>% select(-feature.BO.ngram)
                                 # 5d. Generate probabilities of observed backed-off n-grams
-                                ngram_Bo_Obs <- ngram_Bo_Obs %>% dplyr::mutate(prob  = ifelse(frequency>0,(frequency - nloDisc) / ngramlo_match$frequency,0))
+                                ngram_Bo_Obs <- ngram_Bo_Obs %>% 
+                                  dplyr::mutate(prob  = ifelse(frequency>0,
+                                                               (frequency - nloDisc) / ngramlo_match$frequency,0))
                                 # 5e. Generate probabilities of unobserved backed-off n-grams 
-                                ngram_Bo_unObs <-ngram_Bo_unObs %>% dplyr::mutate(prob = prob_mass$alpha * frequency / sum(frequency) )
+                                ngram_Bo_unObs <-ngram_Bo_unObs %>% 
+                                  dplyr::mutate(prob = prob_mass$alpha * frequency / sum(frequency) )
                                 # Combine observed and unobserved n-grams
                                 ngram_Bo <- rbind(ngram_Bo_Obs,ngram_Bo_unObs)
                                 # 6. Calculate (n+1)-gram probability discount mass - using observed (n+1)-gram probabilities
                                 prob_mass <- prob_mass %>% dplyr::mutate(alpha2 = 1 - sum(ngram_Obs_pred$prob.pred))
                                 # 7. Calculate unobserved backed-off (n+1)-gram probabilities
-                                ngram_Bo_unObs_pred <- ngram_Bo %>% dplyr::mutate(feature.pred = paste(text.token[1],feature,sep="_"),
-                                                                                  prob.pred = prob_mass$alpha2*prob / sum(prob))
+                                ngram_Bo_unObs_pred <- ngram_Bo %>% 
+                                  dplyr::mutate(feature.pred = paste(text.token[1],feature,sep="_"),
+                                                prob.pred = prob_mass$alpha2*prob / sum(prob))
                                 # 8. Select prediction with highest probability
                                 # Clean data frames
-                                ngram_Bo_unObs_pred <- ngram_Bo_unObs_pred %>% dplyr::mutate(next.word = sub(".*_", "",feature.pred)) %>%
+                                ngram_Bo_unObs_pred <- ngram_Bo_unObs_pred %>% 
+                                  dplyr::mutate(next.word = sub(".*_", "",feature.pred)) %>%
                                         select(feature,frequency,feature.pred,prob.pred,next.word)
-                                ngram_pred <- ngram_Obs_pred %>% select(feature,frequency,feature.pred,prob.pred,next.word) %>% 
+                                ngram_pred <- ngram_Obs_pred %>% 
+                                  select(feature,frequency,feature.pred,prob.pred,next.word) %>% 
                                         rbind(ngram_Bo_unObs_pred) %>% arrange(desc(prob.pred))
                                 return(ngram_pred[1:min(nwords,nrow(ngram_pred)), c("next.word","prob.pred")])
                         }
@@ -709,6 +717,9 @@ ngram_kbo_DF <- function(text.input,freq.table,nwords,len=3){
                 i = i + 1
                 message(text.n - i)
         }
+        # =============================
+        # If does not word exists in corpus - take most frequent words
+        # =============================           
         message("Running Unigram Model")                                
         ngram_pred <- unigram_pred(freq.table_uni,text.token)
         return(ngram_pred[1:min(nwords,nrow(ngram_pred)), c("next.word","prob.pred")])        
@@ -761,9 +772,6 @@ ngram_mc_DF <- function(text.input,freq.table,nwords,len=3){
         
         text.n <- length(text.token)
         
-        nDisc = 0.5
-        nloDisc = 0.5
-        
         # 1.a Split frequency table by ngram
         #select maximum ngram order to inspect in frequency table
         ngram_max <- min(len+1,max(freq.table$ngram))
@@ -787,7 +795,7 @@ ngram_mc_DF <- function(text.input,freq.table,nwords,len=3){
                 ngram_match <- ft_list[[max(text.n - i + 1,1)]] %>% filter(grepl(paste0("^",text.ngram,"_"),feature))
                 
                 # =============================
-                # If word exists in corpus - Katz Back-Off Model
+                # If word exists in corpus - Markov Chain Model
                 # =============================        
                 if(nrow(ngram_match)>0){
                         ngram_pred <- ngram_match %>% mutate(next.word = gsub(paste0("^",text.ngram,"_"),"",feature)) %>%
@@ -796,6 +804,9 @@ ngram_mc_DF <- function(text.input,freq.table,nwords,len=3){
                 }
                 i = i + 1
         }
+        # =============================
+        # If does not word exists in corpus - take most frequent words
+        # =============================         
         message("Running Unigram Model")                                
         ngram_pred <- unigram_pred(freq.table_uni,text.token)
         return(ngram_pred[1:min(nwords,nrow(ngram_pred)), "next.word"])        
